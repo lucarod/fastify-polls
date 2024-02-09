@@ -4,6 +4,7 @@ import { FastifyInstance } from 'fastify';
 import { prisma } from '../../lib/prisma';
 import { redis } from '../../lib/redis';
 import { voteOnPollBody, voteOnPollParams } from '../schemas/vote-on-poll-schemas';
+import { voting } from '../../utils/voting-pub-sub';
 
 export async function voteOnPoll(app: FastifyInstance) {
   app.post('/polls/:pollId/votes', async (request, reply) => {
@@ -30,7 +31,12 @@ export async function voteOnPoll(app: FastifyInstance) {
 
           await prisma.vote.delete({ where: { id: userPreviousVote.id } });
 
-          await redis.zincrby(pollId, -1, userPreviousVote.pollOptionId);
+          const votes = await redis.zincrby(pollId, -1, userPreviousVote.pollOptionId);
+
+          voting.publish(pollId, {
+            pollOptionId: userPreviousVote.pollOptionId,
+            votes: parseInt(votes),
+          });
         }
       }
 
@@ -45,7 +51,7 @@ export async function voteOnPoll(app: FastifyInstance) {
         });
       }
 
-      const { id } = await prisma.vote.create({
+      await prisma.vote.create({
         data: {
           sessionId,
           pollId,
@@ -53,9 +59,14 @@ export async function voteOnPoll(app: FastifyInstance) {
         },
       });
 
-      await redis.zincrby(pollId, 1, pollOptionId);
+      const votes = await redis.zincrby(pollId, 1, pollOptionId);
 
-      return reply.code(201).send({ id });
+      voting.publish(pollId, {
+        pollOptionId,
+        votes: parseInt(votes),
+      });
+
+      return reply.code(201).send({ id: pollOptionId });
     } catch (error) {
       if (error instanceof z.ZodError) {
         return reply.code(409).send(error.issues);
